@@ -1,0 +1,24 @@
+[project]
+name = "qr-code-verifier"
+version = "0.1.0"
+description = "QR code message verification with RSA signatures and key registry"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [{ name = "Moh", email = "mkashani.phd@gmail.com" }]
+dependencies = [
+  # Crypto (stable, widely compatible)
+  "cryptography==42.0.8",
+
+  # QR code creation
+  "qrcode==7.4.2",
+
+  # Image support for qrcode + Qt interop
+  "pillow==10.4.0",
+
+  # Qt GUI (PySide6 is typically the smoothest on macOS)
+  "pyside6==6.7.2",
+]
+
+[build-system]
+requires = ["setuptools==69.5.1"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,12 @@
+.venv
+/qr_code_verifier.egg-info
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+.DS_Store
+
+
+uv.lock
