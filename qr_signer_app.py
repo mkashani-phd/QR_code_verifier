@@ -3,14 +3,14 @@ import json
 import base64
 import time
 import hashlib
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import (
     QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTextEdit, QLineEdit, QMessageBox, QFileDialog,
-    QGroupBox, QFormLayout, QScrollArea, QSizePolicy
+    QLabel, QPushButton, QTextEdit, QMessageBox, QFileDialog,
+    QGroupBox, QLineEdit, QComboBox
 )
 
 import qrcode
@@ -20,10 +20,20 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
 
 
+# -----------------------------
+# Config
+# -----------------------------
+APP_DIR = os.path.abspath(os.path.dirname(__file__))
+KEYSTORE_DIR = os.path.join(APP_DIR, "keystore")
+os.makedirs(KEYSTORE_DIR, exist_ok=True)
+
 SIG_ALG = "RSA-PSS-SHA256"
-MSG_QR_PREFIX = "M1"   # M1.<kid>.<payload_b64url>.<sig_b64url>
+MSG_QR_PREFIX = "M1"  # M1.<kid>.<payload_b64url>.<sig_b64url>
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def b64url_encode(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
@@ -39,8 +49,17 @@ def pil_to_qpixmap(img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
-def load_private_key_pem_from_text(pem_text: str):
-    return serialization.load_pem_private_key(pem_text.encode("utf-8"), password=None)
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_private_key_pem(path: str):
+    with open(path, "rb") as f:
+        return serialization.load_pem_private_key(f.read(), password=None)
 
 
 def sign_with_private_key(privkey, payload_bytes: bytes) -> bytes:
@@ -56,21 +75,60 @@ def make_message_qr_string(kid: str, payload_obj: dict, sig: bytes) -> str:
     return f"{MSG_QR_PREFIX}.{kid}.{b64url_encode(payload_b)}.{b64url_encode(sig)}"
 
 
-def sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _extract_kid_from_filename(filename: str) -> Optional[str]:
+    """
+    Accept:
+      Moh_private.pem -> kid = Moh
+      Moh_private.key -> kid = Moh
+      Moh_private_key.pem -> kid = Moh
+    Rule: take everything before '_private'
+    """
+    lower = filename.lower()
+    if "_private" not in lower:
+        return None
+    idx = lower.index("_private")
+    kid = filename[:idx]
+    kid = kid.strip()
+    return kid if kid else None
 
 
+def list_keystore_keys(keystore_dir: str) -> List[Tuple[str, str]]:
+    """
+    Returns list of (kid, filepath) for private keys found.
+    """
+    out: List[Tuple[str, str]] = []
+    for fn in sorted(os.listdir(keystore_dir)):
+        path = os.path.join(keystore_dir, fn)
+        if not os.path.isfile(path):
+            continue
+        if not (fn.lower().endswith(".pem") or fn.lower().endswith(".key")):
+            continue
+        kid = _extract_kid_from_filename(fn)
+        if not kid:
+            continue
+        out.append((kid, path))
+    # If duplicates, keep first by filename sort
+    seen = set()
+    dedup = []
+    for kid, path in out:
+        if kid in seen:
+            continue
+        seen.add(kid)
+        dedup.append((kid, path))
+    return dedup
+
+
+# -----------------------------
+# UI
+# -----------------------------
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("QR Signer (RSA-PSS-SHA256)")
-        self.resize(900, 650)  # smaller default
+        self.setWindowTitle("QR Signer (Simple)")
+        self.resize(820, 620)
 
         self._qr_pil: Optional[Image.Image] = None
+        self._keys: List[Tuple[str, str]] = []
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -78,150 +136,111 @@ class MainWindow(QWidget):
 
         self.tab_sign = QWidget()
         self.tab_integrity = QWidget()
-
-        tabs.addTab(self.tab_sign, "Sign → QR")
+        tabs.addTab(self.tab_sign, "Sign")
         tabs.addTab(self.tab_integrity, "App Integrity")
 
-        self._build_sign_tab_compact()
+        self._build_sign_tab()
         self._build_integrity_tab()
         self._refresh_integrity()
+        self.reload_keys()
 
-    # ---------------- Sign tab (compact + scroll) ----------------
-    def _build_sign_tab_compact(self):
-        # Make the whole sign tab scrollable so it always fits
-        outer = QVBoxLayout(self.tab_sign)
+    # -------- Sign tab --------
+    def _build_sign_tab(self):
+        layout = QVBoxLayout(self.tab_sign)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        outer.addWidget(scroll)
+        top = QHBoxLayout()
+        layout.addLayout(top)
 
-        content = QWidget()
-        scroll.setWidget(content)
+        top.addWidget(QLabel("Private key:"))
+        self.key_combo = QComboBox()
+        self.key_combo.setMinimumWidth(260)
+        top.addWidget(self.key_combo, 1)
 
-        layout = QHBoxLayout(content)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        self.btn_reload = QPushButton("Reload keystore")
+        self.btn_reload.clicked.connect(self.reload_keys)
+        top.addWidget(self.btn_reload)
 
-        left = QVBoxLayout()
-        right = QVBoxLayout()
-        layout.addLayout(left, 2)
-        layout.addLayout(right, 1)
-
-        # Private key + kid
-        key_box = QGroupBox("Signing Key")
-        left.addWidget(key_box)
-        form = QFormLayout(key_box)
-        form.setLabelAlignment(Qt.AlignRight)
-
-        self.kid_in = QLineEdit()
-        self.kid_in.setPlaceholderText("kid (e.g., alice-key-1)")
-        form.addRow("kid:", self.kid_in)
-
-        self.privkey_pem_in = QTextEdit()
-        self.privkey_pem_in.setPlaceholderText(
-            "Paste PRIVATE KEY (PKCS8) PEM here..."
-        )
-        self.privkey_pem_in.setFixedHeight(120)  # smaller
-        form.addRow("Private key:", self.privkey_pem_in)
-
-        row = QHBoxLayout()
-        self.btn_import_priv = QPushButton("Import PEM…")
-        self.btn_import_priv.clicked.connect(self.on_import_private_key_file)
-        row.addWidget(self.btn_import_priv)
-
-        self.btn_clear_priv = QPushButton("Clear")
-        self.btn_clear_priv.clicked.connect(lambda: self.privkey_pem_in.clear())
-        row.addWidget(self.btn_clear_priv)
-        form.addRow(row)
-
-        # Message
-        msg_box = QGroupBox("Message")
-        left.addWidget(msg_box)
-        mv = QVBoxLayout(msg_box)
+        # message box
+        layout.addWidget(QLabel("Message:"))
         self.msg_in = QTextEdit()
-        self.msg_in.setPlaceholderText("Message text (will be embedded in QR payload).")
-        self.msg_in.setFixedHeight(120)  # smaller
-        mv.addWidget(self.msg_in)
+        self.msg_in.setPlaceholderText("Type message here…")
+        self.msg_in.setFixedHeight(160)
+        layout.addWidget(self.msg_in)
 
-        # Sign button
-        btn_row = QHBoxLayout()
+        # sign button
+        row = QHBoxLayout()
+        layout.addLayout(row)
+
         self.btn_sign = QPushButton("Sign → Generate QR")
-        self.btn_sign.clicked.connect(self.on_sign_generate_qr)
-        btn_row.addWidget(self.btn_sign)
+        self.btn_sign.clicked.connect(self.on_sign)
+        row.addWidget(self.btn_sign)
 
-        btn_row.addStretch(1)
-        left.addLayout(btn_row)
+        row.addStretch(1)
 
-        # Outputs (compact)
-        out_box = QGroupBox("Outputs")
-        left.addWidget(out_box, 1)
-        ov = QVBoxLayout(out_box)
-        ov.setSpacing(6)
+        # status
+        self.status = QLabel("")
+        self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.status)
 
-        ov.addWidget(QLabel("Payload JSON:"))
-        self.payload_out = QTextEdit()
-        self.payload_out.setReadOnly(True)
-        self.payload_out.setFixedHeight(120)
-        ov.addWidget(self.payload_out)
-
-        ov.addWidget(QLabel("Signature (b64url):"))
-        self.sig_out = QTextEdit()
-        self.sig_out.setReadOnly(True)
-        self.sig_out.setFixedHeight(55)
-        ov.addWidget(self.sig_out)
-
-        ov.addWidget(QLabel("QR String:"))
-        self.qr_str_out = QTextEdit()
-        self.qr_str_out.setReadOnly(True)
-        self.qr_str_out.setFixedHeight(90)
-        ov.addWidget(self.qr_str_out)
-
-        # Right: QR preview + actions (smaller)
-        qr_box = QGroupBox("QR Preview")
-        right.addWidget(qr_box, 1)
-        qv = QVBoxLayout(qr_box)
+        # QR preview + actions
+        qr_row = QHBoxLayout()
+        layout.addLayout(qr_row)
 
         self.qr_img = QLabel("(QR preview)")
         self.qr_img.setAlignment(Qt.AlignCenter)
-        self.qr_img.setMinimumHeight(240)
-        self.qr_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        qv.addWidget(self.qr_img, 1)
+        self.qr_img.setMinimumSize(320, 320)
+        qr_row.addWidget(self.qr_img, 1)
 
-        self.btn_copy_qr = QPushButton("Copy QR String")
-        self.btn_copy_qr.clicked.connect(self.on_copy_qr_string)
-        right.addWidget(self.btn_copy_qr)
+        right = QVBoxLayout()
+        qr_row.addLayout(right, 1)
 
-        self.btn_save_png = QPushButton("Save QR PNG…")
-        self.btn_save_png.clicked.connect(self.on_save_qr_png)
-        right.addWidget(self.btn_save_png)
+        right.addWidget(QLabel("QR string:"))
+        self.qr_str_out = QTextEdit()
+        self.qr_str_out.setReadOnly(True)
+        self.qr_str_out.setFixedHeight(170)
+        right.addWidget(self.qr_str_out)
+
+        self.btn_copy = QPushButton("Copy QR String")
+        self.btn_copy.clicked.connect(self.on_copy)
+        right.addWidget(self.btn_copy)
+
+        self.btn_save = QPushButton("Save QR PNG…")
+        self.btn_save.clicked.connect(self.on_save_png)
+        right.addWidget(self.btn_save)
 
         right.addStretch(1)
 
-    def on_import_private_key_file(self):
+    def reload_keys(self):
+        self._keys = list_keystore_keys(KEYSTORE_DIR)
+        self.key_combo.clear()
+
+        if not self._keys:
+            self.key_combo.addItem("(no keys found in ./keystore)", None)
+            self.status.setText(f"⚠️ No private keys found in: {KEYSTORE_DIR}\n"
+                                f"Expected filenames like: Moh_private.pem or Moh_private.key")
+            return
+
+        for kid, path in self._keys:
+            self.key_combo.addItem(f"{kid}", path)
+
+        self.status.setText(f"Loaded {len(self._keys)} key(s) from keystore: {KEYSTORE_DIR}")
+
+    def on_sign(self):
         try:
-            path, _ = QFileDialog.getOpenFileName(self, "Select private key PEM", "", "PEM (*.pem *.key);;All files (*)")
+            path = self.key_combo.currentData()
             if not path:
-                return
-            with open(path, "r", encoding="utf-8") as f:
-                self.privkey_pem_in.setPlainText(f.read())
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
-
-    def on_sign_generate_qr(self):
-        try:
-            kid = self.kid_in.text().strip()
-            if not kid:
-                raise ValueError("kid is required.")
-
-            pem = self.privkey_pem_in.toPlainText().strip()
-            if not pem:
-                raise ValueError("Private key PEM is required.")
+                raise ValueError("No private key selected (keystore is empty).")
 
             msg = self.msg_in.toPlainText()
             if not msg.strip():
                 raise ValueError("Message is empty.")
 
-            priv = load_private_key_pem_from_text(pem)
+            filename = os.path.basename(path)
+            kid = _extract_kid_from_filename(filename)
+            if not kid:
+                raise ValueError(f"Could not derive kid from filename: {filename}")
+
+            priv = load_private_key_pem(path)
 
             payload = {
                 "v": 1,
@@ -230,23 +249,21 @@ class MainWindow(QWidget):
                 "msg": msg
             }
             payload_b = canonical_json_bytes(payload)
-
             sig = sign_with_private_key(priv, payload_b)
-            qr_str = make_message_qr_string(kid, payload, sig)
 
-            self.payload_out.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-            self.sig_out.setPlainText(b64url_encode(sig))
+            qr_str = make_message_qr_string(kid, payload, sig)
             self.qr_str_out.setPlainText(qr_str)
 
-            # Smaller QR image to fit
             img = qrcode.make(qr_str).resize((320, 320))
             self._qr_pil = img
             self.qr_img.setPixmap(pil_to_qpixmap(img))
 
+            self.status.setText(f"✅ Signed with kid={kid} ({filename})")
+
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
-    def on_copy_qr_string(self):
+    def on_copy(self):
         s = self.qr_str_out.toPlainText().strip()
         if not s:
             QMessageBox.warning(self, "Copy", "No QR string to copy.")
@@ -254,7 +271,7 @@ class MainWindow(QWidget):
         QApplication.clipboard().setText(s)
         QMessageBox.information(self, "Copy", "Copied QR string.")
 
-    def on_save_qr_png(self):
+    def on_save_png(self):
         if self._qr_pil is None:
             QMessageBox.warning(self, "Save", "Generate a QR first.")
             return
@@ -264,7 +281,7 @@ class MainWindow(QWidget):
         self._qr_pil.save(path, format="PNG")
         QMessageBox.information(self, "Saved", f"Saved to:\n{path}")
 
-    # ---------------- Integrity tab ----------------
+    # -------- Integrity tab --------
     def _build_integrity_tab(self):
         layout = QVBoxLayout(self.tab_integrity)
 

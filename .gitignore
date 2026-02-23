@@ -12,4 +12,4 @@ __pycache__
 
 uv.lock
 key_registry.json
-private_key.pem
+*private.pem
