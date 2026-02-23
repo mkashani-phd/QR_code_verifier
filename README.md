@@ -27,6 +27,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
+
+
 ## Run the verifier
 ``` bash
 git clone https://github.com/mkashani-phd/QR_code_verifier.git
