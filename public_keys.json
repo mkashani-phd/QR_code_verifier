@@ -1,0 +1,9 @@
+{
+  "keys": [
+    {
+      "kid": "0",
+      "name": "Saved key",
+      "pub_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0MzFJE2hVTH3lYtVi2sq\nt1qzkXl9PjqIjuIFOAYBeHKV7XksWLwAxY4jV16PeUZvOIsPotTCPoOObCo4/irG\nhdj1tMG/0b2eR71qaepMkZu+hlm6k9jGVFhP90wN724WK2nA5zN6Wh1vTKrdVaho\noli7j06CuNyM6kIb2Tnk/xbSplkoDxHUaoqUTHAspqnc2lsl4FAR7fFJIFLkw5s3\nU8iRB2D6vlgbHbz/mbGBldk+qn5R6/Sf7Vz240mZHgYT+tZ9f/EG2fJevlKwqNWl\n3YA89cV/l/v3aA7NV6t1XvcB80/h0U3QfyggRLUz8eQ4bpybD/Vyvnv1kUZVb8S1\nMQIDAQAB\n-----END PUBLIC KEY-----"
+    }
+  ]
+}
