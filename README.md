@@ -24,7 +24,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 - Windows
 ```bash
-powershell -c "irm https://astral.sh/uv/install.ps1 | more"
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 ## Run the verifier
