@@ -1,24 +1,28 @@
 [project]
 name = "qr-code-verifier"
 version = "0.1.0"
-description = "QR code message verification with RSA signatures and key registry"
+description = "Qt RSA QR key registry + sign/verify"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
-authors = [{ name = "Moh", email = "mkashani.phd@gmail.com" }]
+
 dependencies = [
-  # Crypto (stable, widely compatible)
-  "cryptography==42.0.8",
+  # --- QR + GUI ---
+  "PySide6>=6.6,<6.8",
+  "qrcode[pil]>=7.4,<8",
+  "Pillow>=10.2,<12",
 
-  # QR code creation
-  "qrcode==7.4.2",
+  # --- Crypto ---
+  "cryptography>=42,<45",
 
-  # Image support for qrcode + Qt interop
-  "pillow==10.4.0",
-
-  # Qt GUI (PySide6 is typically the smoothest on macOS)
-  "pyside6==6.7.2",
+  # --- Webcam QR scanning (OpenCV) ---
+  # Critical: keep NumPy <2 until your OpenCV wheel is confirmed NumPy-2 ABI compatible.
+  "numpy>=1.26,<2",
+  "opencv-python>=4.8,<5",
 ]
 
-[build-system]
-requires = ["setuptools==69.5.1"]
-build-backend = "setuptools.build_meta"
+[project.scripts]
+qr-code-verifier = "rsa_qr_registry_qt:main"
+
+[tool.uv]
+# This makes installs more predictable on macOS (prefer wheels, avoid source builds).
+no-build-isolation = true

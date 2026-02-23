@@ -1,5 +1,6 @@
 .venv
 /qr_code_verifier.egg-info
+# /keystore
 __pycache__
 *.pyc
 *.pyo
@@ -10,3 +11,4 @@ __pycache__
 
 
 uv.lock
+key_registry.json
