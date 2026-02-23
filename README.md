@@ -17,17 +17,17 @@ a94a8319c7d42b1c60c3b60eaf4be3ce54af0c10c3bf6ef43141857f1267838d
 
 # How to use
 
-## Install UV and run the software
-### Linux/MAC
+### Install UV 
+- Linux/MAC
 ```bash 
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
-### Windows
+- Windows
 ```bash
 powershell -c "irm https://astral.sh/uv/install.ps1 | more"
 ```
 
-## clone and run the verifier
+## Run the verifier
 ``` bash
 git clone https://github.com/mkashani-phd/QR_code_verifier.git
 cd QR_code_verifier
@@ -41,9 +41,7 @@ uv run qr_verify_app.py
  openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
 
-Make sure that you don't make public the private key!!!
+Make sure that you don't make the private key public!!!
 
-It is the receiver responsibility to make sure that he has the corret public key!
-
-I suppose creating a block chain of the trusted public key won't be a bad idea.
+It is the receiver's responsibility to make sure that they have the corret public key of the reciever! I suppose creating a block chain of the trusted public key won't be a bad idea.
 
