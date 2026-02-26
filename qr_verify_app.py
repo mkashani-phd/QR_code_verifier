@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import cv2
+import numpy as np
+from PIL import Image
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QImage
@@ -25,7 +27,6 @@ from cryptography.exceptions import InvalidSignature
 # -----------------------------
 APP_DIR = os.path.abspath(os.path.dirname(__file__))
 PUBREG_PATH = os.path.join(APP_DIR, "public_keys.json")
-MSG_QR_PREFIX = "M1"  # M1.<kid>.<payload_b64url>.<sig_b64url>
 
 
 # -----------------------------
@@ -53,26 +54,177 @@ def cv_bgr_to_qpixmap(frame_bgr) -> QPixmap:
     return QPixmap.fromImage(qimg)
 
 
-def parse_message_qr_string(qr: str) -> Tuple[str, dict, bytes, bytes]:
-    # M1.kid.payload_b64.sig_b64
-    parts = qr.strip().split(".")
-    if len(parts) != 4 or parts[0] != MSG_QR_PREFIX:
-        raise ValueError("QR must be: M1.<kid>.<payload_b64url>.<sig_b64url>")
-    kid = parts[1]
-    payload_b = b64url_decode(parts[2])
-    sig_b = b64url_decode(parts[3])
-    payload_obj = json.loads(payload_b.decode("utf-8"))
-    return kid, payload_obj, payload_b, sig_b
+def normalize_public_key_text(text: str) -> str:
+    """
+    Accepts:
+      - ssh-ed25519 AAAA... [comment]
+      - known_hosts lines: host ssh-ed25519 AAAA... comment
+      - PEM public key blocks
+    Returns:
+      - Clean OpenSSH public key line, or original PEM.
+    """
+    t = text.strip()
+    if not t:
+        return t
 
+    # private key guard
+    if "BEGIN OPENSSH PRIVATE KEY" in t or "BEGIN PRIVATE KEY" in t:
+        raise ValueError(
+            "You pasted a PRIVATE key. The verifier needs a PUBLIC key.\n\n"
+            "Extract public key with:\n"
+            "  ssh-keygen -y -f <private_key>\n"
+            "and paste the line that starts with ssh-ed25519/ssh-rsa/..."
+        )
 
-def verify_with_public_key_pem(pub_pem_text: str, payload_bytes: bytes, sig_bytes: bytes) -> None:
-    pub = serialization.load_pem_public_key(pub_pem_text.encode("utf-8"))
-    pub.verify(
-        sig_bytes,
-        payload_bytes,
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-        hashes.SHA256(),
+    # PEM stays as-is
+    if "BEGIN PUBLIC KEY" in t or t.startswith("-----BEGIN"):
+        return t
+
+    tokens = t.split()
+    ssh_types = (
+        "ssh-ed25519",
+        "ssh-rsa",
+        "ssh-dss",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com",
+        "sk-ecdsa-sha2-nistp256@openssh.com",
+        "ssh-ed25519-cert-v01@openssh.com",
+        "ssh-rsa-cert-v01@openssh.com",
     )
+
+    for i, tok in enumerate(tokens):
+        if tok in ssh_types:
+            if i + 1 >= len(tokens):
+                raise ValueError("SSH public key is missing its base64 data.")
+            out = tokens[i:i+2]
+            if i + 2 < len(tokens):
+                out.append(" ".join(tokens[i+2:]))
+            return " ".join(out)
+
+    return t
+
+
+def verify_with_public_key_text(pub_key_text: str, message_text: str, sig_bytes: bytes) -> None:
+    """
+    Verifies signature over message_text (UTF-8 bytes).
+    Supports:
+      - OpenSSH public key lines: ssh-ed25519 / ssh-rsa / ecdsa-sha2-* / sk-* / certs
+      - PEM public keys: -----BEGIN PUBLIC KEY-----
+    """
+    key_text = normalize_public_key_text(pub_key_text).strip()
+    if not key_text:
+        raise ValueError("Public key is empty.")
+
+    msg_bytes = message_text.encode("utf-8")
+
+    # OpenSSH public key line
+    if key_text.startswith("ssh-") or key_text.startswith("ecdsa-sha2-") or key_text.startswith("sk-"):
+        pub = serialization.load_ssh_public_key(key_text.encode("utf-8"))
+        pub.verify(sig_bytes, msg_bytes)
+        return
+
+    # PEM public key
+    pub = serialization.load_pem_public_key(key_text.encode("utf-8"))
+
+    from cryptography.hazmat.primitives.asymmetric import rsa, ec
+
+    if isinstance(pub, rsa.RSAPublicKey):
+        pub.verify(
+            sig_bytes,
+            msg_bytes,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256(),
+        )
+        return
+
+    if isinstance(pub, ec.EllipticCurvePublicKey):
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        pub.verify(sig_bytes, msg_bytes, _ec.ECDSA(hashes.SHA256()))
+        return
+
+    raise ValueError("Unsupported public key type for verification.")
+
+
+def parse_message_qr_json(qr_text: str) -> Tuple[str, str, bytes]:
+    """
+    Expected QR JSON:
+      {"k":"<kid>","m":"<message>","s":"<base64url signature>"}
+    """
+    try:
+        obj = json.loads(qr_text)
+    except Exception:
+        raise ValueError("QR does not contain valid JSON.")
+
+    if not isinstance(obj, dict):
+        raise ValueError("QR JSON must be an object.")
+    for field in ("k", "m", "s"):
+        if field not in obj:
+            raise ValueError(f"QR JSON missing field '{field}'.")
+
+    kid = str(obj["k"]).strip()
+    msg = str(obj["m"])
+    sig_b64 = str(obj["s"]).strip()
+
+    if not kid:
+        raise ValueError("Field 'k' (kid) is empty.")
+    if not sig_b64:
+        raise ValueError("Field 's' (signature) is empty.")
+
+    sig = b64url_decode(sig_b64)
+    return kid, msg, sig
+
+
+def decode_qr_from_image_robust(path: str) -> str:
+    """
+    Robust QR decoding for file images (macOS friendly).
+    - Load with PIL (handles HEIC/odd PNGs better than cv2.imread)
+    - Try raw/grayscale/adaptive threshold/otsu + upscales
+    """
+    pil = Image.open(path).convert("RGB")
+    rgb = np.array(pil)
+    bgr0 = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    detector = cv2.QRCodeDetector()
+
+    def try_decode(img_bgr: np.ndarray) -> str:
+        decoded, _, _ = detector.detectAndDecode(img_bgr)
+        if decoded:
+            return decoded.strip()
+        try:
+            ok, infos, _, _ = detector.detectAndDecodeMulti(img_bgr)
+            if ok and infos:
+                for s in infos:
+                    if s:
+                        return s.strip()
+        except Exception:
+            pass
+        return ""
+
+    gray0 = cv2.cvtColor(bgr0, cv2.COLOR_BGR2GRAY)
+
+    candidates = [
+        bgr0,
+        cv2.cvtColor(gray0, cv2.COLOR_GRAY2BGR),
+        cv2.cvtColor(
+            cv2.adaptiveThreshold(gray0, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5),
+            cv2.COLOR_GRAY2BGR
+        ),
+        cv2.cvtColor(
+            cv2.threshold(gray0, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+            cv2.COLOR_GRAY2BGR
+        ),
+    ]
+
+    for base in candidates:
+        for s in [1.0, 1.5, 2.0, 3.0]:
+            img = base if s == 1.0 else cv2.resize(base, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+            decoded = try_decode(img)
+            if decoded:
+                return decoded
+
+    raise ValueError("No QR code detected in this image (tried multiple preprocess + scales).")
 
 
 # -----------------------------
@@ -81,7 +233,7 @@ def verify_with_public_key_pem(pub_pem_text: str, payload_bytes: bytes, sig_byte
 @dataclass
 class PubKeyEntry:
     kid: str
-    pub_pem: str
+    pub_pem: str  # can store PEM or ssh-* public key line
 
 
 class PublicKeyRegistry:
@@ -112,7 +264,8 @@ class PublicKeyRegistry:
         return self.keys.get(kid)
 
     def upsert(self, kid: str, pub_pem: str):
-        self.keys[kid] = PubKeyEntry(kid=kid, pub_pem=pub_pem)
+        pub_norm = normalize_public_key_text(pub_pem)
+        self.keys[kid] = PubKeyEntry(kid=kid, pub_pem=pub_norm)
         self.save()
 
 
@@ -219,9 +372,8 @@ class MainWindow(QWidget):
         self.registry = PublicKeyRegistry(PUBREG_PATH)
 
         self._last_kid: Optional[str] = None
-        self._last_payload_b: Optional[bytes] = None
-        self._last_sig_b: Optional[bytes] = None
         self._last_msg: str = ""
+        self._last_sig: Optional[bytes] = None
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -239,7 +391,6 @@ class MainWindow(QWidget):
     def _build_verify_tab(self):
         layout = QVBoxLayout(self.tab_verify)
 
-        # Top buttons (only two)
         btns = QHBoxLayout()
         layout.addLayout(btns)
 
@@ -253,12 +404,10 @@ class MainWindow(QWidget):
 
         btns.addStretch(1)
 
-        # Status
         self.status = QLabel("Load/scan a QR to verify.")
         self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.status)
 
-        # Big message output
         msg_box = QGroupBox("Message")
         layout.addWidget(msg_box)
         mv = QV(msg_box)
@@ -270,7 +419,6 @@ class MainWindow(QWidget):
         self.big_message.setFixedHeight(220)
         mv.addWidget(self.big_message)
 
-        # Public key fallback (hidden unless needed)
         self.key_box = QGroupBox("Public Key Needed")
         layout.addWidget(self.key_box)
         kv = QV(self.key_box)
@@ -278,7 +426,9 @@ class MainWindow(QWidget):
         self.pubkey_pem = QTextEdit()
         self.pubkey_pem.setPlaceholderText(
             "Public key for this kid was not found in public_keys.json.\n"
-            "Paste PUBLIC KEY PEM here, then click Verify + Save."
+            "Paste PUBLIC KEY here (ssh-ed25519/ssh-rsa/... or PEM public key), then click Verify + Save.\n\n"
+            "Tip: If you only have the private key, get the public key with:\n"
+            "  ssh-keygen -y -f <private_key>"
         )
         self.pubkey_pem.setFixedHeight(140)
         kv.addWidget(self.pubkey_pem)
@@ -297,10 +447,8 @@ class MainWindow(QWidget):
         key_btns.addStretch(1)
 
         self.key_box.setVisible(False)
-
         layout.addStretch(1)
 
-    # ---- Main flows ----
     def on_scan_webcam(self):
         dlg = QRScannerDialog(self)
         if dlg.exec() == QDialog.Accepted:
@@ -310,51 +458,46 @@ class MainWindow(QWidget):
 
     def on_load_qr_image(self):
         try:
-            path, _ = QFileDialog.getOpenFileName(self, "Select QR image", "", "Images (*.png *.jpg *.jpeg *.bmp);;All files (*)")
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select QR image", "",
+                "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.heic *.heif);;All files (*)"
+            )
             if not path:
                 return
-            img = cv2.imread(path)
-            if img is None:
-                raise ValueError("Could not read image.")
-            detector = cv2.QRCodeDetector()
-            decoded, points, _ = detector.detectAndDecode(img)
-            if not decoded:
-                raise ValueError("No QR code detected in this image.")
-            self._handle_qr_string(decoded.strip())
+            decoded = decode_qr_from_image_robust(path)
+            self._handle_qr_string(decoded)
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
     def _handle_qr_string(self, qr: str):
-        # Reset UI
         self.key_box.setVisible(False)
         self.pubkey_pem.clear()
         self.big_message.clear()
         self.status.setText("Parsing…")
 
         try:
-            kid, payload_obj, payload_b, sig_b = parse_message_qr_string(qr)
+            kid, msg, sig = parse_message_qr_json(qr)
 
             self._last_kid = kid
-            self._last_payload_b = payload_b
-            self._last_sig_b = sig_b
-            self._last_msg = str(payload_obj.get("msg", ""))
+            self._last_msg = msg
+            self._last_sig = sig
 
-            # Try to verify using saved key
             entry = self.registry.get(kid)
             if not entry:
-                # Ask for public key
                 self.status.setText(f"⚠️ No stored public key for kid={kid}. Paste it below.")
                 self.key_box.setVisible(True)
-                QMessageBox.warning(self, "Public key missing",
-                                    f"No public key stored for kid={kid}.\n\n"
-                                    f"Paste the PUBLIC KEY PEM, then click Verify + Save.")
-                # Still show message (untrusted until verified)
-                self.big_message.setPlainText(self._last_msg)
+                QMessageBox.warning(
+                    self,
+                    "Public key missing",
+                    f"No public key stored for kid={kid}.\n\n"
+                    f"Paste the PUBLIC KEY, then click Verify + Save."
+                )
+                self.big_message.setPlainText(msg)  # untrusted until verified
                 return
 
-            verify_with_public_key_pem(entry.pub_pem, payload_b, sig_b)
+            verify_with_public_key_text(entry.pub_pem, msg, sig)
 
-            self.big_message.setPlainText(self._last_msg)
+            self.big_message.setPlainText(msg)
             self.status.setText(f"✅ VALID signature (kid={kid})")
 
         except InvalidSignature:
@@ -366,15 +509,15 @@ class MainWindow(QWidget):
 
     def on_verify_with_pasted_key(self):
         try:
-            if not self._last_kid or self._last_payload_b is None or self._last_sig_b is None:
+            if not self._last_kid or self._last_sig is None:
                 raise ValueError("No QR loaded yet. Scan/load a QR first.")
 
-            pem = self.pubkey_pem.toPlainText().strip()
-            if not pem:
-                raise ValueError("Paste a PUBLIC KEY PEM first.")
+            key_text_raw = self.pubkey_pem.toPlainText().strip()
+            key_text = normalize_public_key_text(key_text_raw)
+            if not key_text:
+                raise ValueError("Paste a PUBLIC key first.")
 
-            # sanity-load + verify
-            verify_with_public_key_pem(pem, self._last_payload_b, self._last_sig_b)
+            verify_with_public_key_text(key_text, self._last_msg, self._last_sig)
 
             self.big_message.setPlainText(self._last_msg)
             self.status.setText(f"✅ VALID signature (kid={self._last_kid}) — key provided manually")
@@ -391,19 +534,22 @@ class MainWindow(QWidget):
             if not self._last_kid:
                 raise ValueError("No kid available. Scan/load a QR first.")
 
-            pem = self.pubkey_pem.toPlainText().strip()
-            if not pem:
-                raise ValueError("Public key PEM is empty.")
+            key_text_raw = self.pubkey_pem.toPlainText().strip()
+            key_text = normalize_public_key_text(key_text_raw)
+            if not key_text:
+                raise ValueError("Public key text is empty.")
 
-            # sanity check
-            serialization.load_pem_public_key(pem.encode("utf-8"))
+            # sanity-load
+            if key_text.startswith("ssh-") or key_text.startswith("ecdsa-sha2-") or key_text.startswith("sk-"):
+                serialization.load_ssh_public_key(key_text.encode("utf-8"))
+            else:
+                serialization.load_pem_public_key(key_text.encode("utf-8"))
 
-            self.registry.upsert(self._last_kid, pem)
+            self.registry.upsert(self._last_kid, key_text)
             QMessageBox.information(self, "Saved", f"Saved key for kid={self._last_kid} to:\n{PUBREG_PATH}")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
-    # -------- Integrity tab --------
     def _build_integrity_tab(self):
         layout = QVBoxLayout(self.tab_integrity)
 

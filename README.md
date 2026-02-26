@@ -7,17 +7,24 @@ To make sure that the application code itself is not modifed below is the hash o
 
 - qr_verify_app.py hash
 ```hash
-57af5dc784c8867ab3ca272b607e45b4348a110a7ca5ab75d5302229af4079f1
+9bad87fae64a3e564bc4d7374a2bafc13023c0377968bcf6c805c0748e588750
 ```
 
 - qr_signer_app.py hash
 ``` hash
-d76e99e10e45b38ef55238edb7abee42f1ba0fbc4cc33dfebdf20419099b21f6
+db315c77001c10ef3cf6500a3edd122901e4cf366049e59fda57f2e0fb568aaf
 ```
+
+- Scan the signed_public_key.png QR code and check if it verifies and matches with the stored public key in the [public_keys.json](public_keys.json) file. It must match.
+
+<p align="center">
+  <img src="signed_public_key.png" alt="Signed public key" width="220" />
+</p>
+
 
 # How to use
 
-### Install UV 
+###  1- Install UV 
 - Linux/MAC
 ```bash 
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -28,19 +35,34 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 ```
 
 
+### 2- install Git (optional)
+you don't have to install git and can download the repository directly.
 
-## Run the verifier
-``` bash
+you can clone the repo using below:
+```bash
 git clone https://github.com/mkashani-phd/QR_code_verifier.git
 cd QR_code_verifier
+```
+
+
+## 3- Run the verifier
+Using powershell or the terminal and navigate to the QR_code_verifier folder and run the following code. 
+``` bash
 uv run qr_verify_app.py
 ```
 
 
 # How to generate a key pair
+
+- SSH key
 ``` bash
- openssl genrsa -out Moh_private.pem 2048
- openssl rsa -in Moh_private_key.pem -pubout -out public_key.pem
+ssh-keygen -t ed25519 -C "comment"
+```
+
+- RSA
+``` bash
+ openssl genrsa -out xxx_private.pem 2048
+ openssl rsa -in xxx_private_key.pem -pubout -out xxx_key.pem
 ```
 **note:** 
 - Moh can be replaced with anything and is indicative of the senders info
